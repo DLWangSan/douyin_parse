@@ -36,7 +36,6 @@ logs/
 # 图片（如果不需要上传）
 images/
 
-# 打包文件
+# 打包文件（exe文件太大，通过GitHub Release上传）
 *.exe
-!dist/douyin_app_full.exe
-!dist/douyin_app_slim.exe
+releases/
