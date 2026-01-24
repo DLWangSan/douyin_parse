@@ -524,9 +524,8 @@ class ABogus:
     @classmethod
     def sm3_to_array(cls, data: str | list) -> list[int]:
         """
-        代码参考: https://github.com/Johnserf-Seed/f2/blob/main/f2/utils/abogus.py
+        Code reference: https://github.com/Johnserf-Seed/f2/blob/main/f2/utils/abogus.py
 
-        计算请求体的 SM3 哈希值，并将结果转换为整数数组
         Calculate the SM3 hash value of the request body and convert the result to an array of integers
 
         Args:
