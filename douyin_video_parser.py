@@ -1,6 +1,6 @@
 """
-抖音无水印视频解析（requests + a_bogus + X-Bogus）
-输入分享链接，输出无水印真实地址
+Douyin watermark-free video parser (requests + a_bogus + X-Bogus)
+Input: share URL, Output: watermark-free video URL
 """
 
 import re

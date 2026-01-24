@@ -1,6 +1,7 @@
 from douyin_video_parser import DouyinVideoParser, get_nwm_url
 
 
+# Demo: Single video download
 def demo_single_video():
     video_url = "https://v.douyin.com/pEkgDrA5nsk"
     parser = DouyinVideoParser()

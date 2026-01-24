@@ -1,3 +1,7 @@
+"""
+Douyin Video Downloader - Qt6 GUI Application
+Full version with auto cookie acquisition support
+"""
 import json
 import os
 import re
