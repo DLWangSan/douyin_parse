@@ -13,7 +13,6 @@
 - ✅ 批量下载功能
 - ✅ 用户主页解析
 
-**旧代码已失效，请使用最新版本！**
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
