@@ -530,21 +530,21 @@ class ABogus:
         Calculate the SM3 hash value of the request body and convert the result to an array of integers
 
         Args:
-            data (Union[str, List[int]]): 输入数据 (Input data).
+            data (Union[str, List[int]]): Input data.
 
         Returns:
-            List[int]: 哈希值的整数数组 (Array of integers representing the hash value).
+            List[int]: Array of integers representing the hash value.
         """
 
         if isinstance(data, str):
             b = data.encode("utf-8")
         else:
-            b = bytes(data)  # 将 List[int] 转换为字节数组
+            b = bytes(data)  # Convert List[int] to byte array
 
-        # 将字节数组转换为适合 sm3.sm3_hash 函数处理的列表格式
+        # Convert byte array to list format suitable for sm3.sm3_hash function
         h = sm3.sm3_hash(func.bytes_to_list(b))
 
-        # 将十六进制字符串结果转换为十进制整数列表
+        # Convert hexadecimal string result to decimal integer list
         return [int(h[i: i + 2], 16) for i in range(0, len(h), 2)]
 
     @classmethod
@@ -624,12 +624,12 @@ if __name__ == "__main__":
     bogus = ABogus()
     USERAGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36"
     url_str = "https://www.douyin.com/aweme/v1/web/aweme/detail/?device_platform=webapp&aid=6383&channel=channel_pc_web&pc_client_type=1&version_code=190500&version_name=19.5.0&cookie_enabled=true&browser_language=zh-CN&browser_platform=Win32&browser_name=Firefox&browser_online=true&engine_name=Gecko&os_name=Windows&os_version=10&platform=PC&screen_width=1920&screen_height=1080&browser_version=124.0&engine_version=122.0.0.0&cpu_core_num=12&device_memory=8&aweme_id=7345492945006595379"
-    # 将url参数转换为字典
+    # Convert URL parameters to dictionary
     url_params = dict([param.split("=")
                       for param in url_str.split("?")[1].split("&")])
-    print(f"URL参数: {url_params}")
+    print(f"URL parameters: {url_params}")
     a_bogus = bogus.get_value(url_params, )
-    # 使用url编码a_bogus
+    # URL encode a_bogus
     a_bogus = quote(a_bogus, safe='')
     print(a_bogus)
     print(USERAGENT)

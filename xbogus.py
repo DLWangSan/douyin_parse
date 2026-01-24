@@ -60,7 +60,6 @@ class XBogus:
 
     def md5_str_to_array(self, md5_str):
         """
-        将字符串使用md5哈希算法转换为整数数组。
         Convert a string to an array of integers using the md5 hashing algorithm.
         """
         if isinstance(md5_str, str) and len(md5_str) > 32:
@@ -78,7 +77,6 @@ class XBogus:
 
     def md5_encrypt(self, url_path):
         """
-        使用多轮md5哈希算法对URL路径进行加密。
         Encrypt the URL path using multiple rounds of md5 hashing.
         """
         hashed_url_path = self.md5_str_to_array(
@@ -88,7 +86,6 @@ class XBogus:
 
     def md5(self, input_data):
         """
-        计算输入数据的md5哈希值。
         Calculate the md5 hash value of the input data.
         """
         if isinstance(input_data, str):
@@ -106,7 +103,6 @@ class XBogus:
         self, a, b, c, e, d, t, f, r, n, o, i, _, x, u, s, l, v, h, p
     ):
         """
-        第一次编码转换。
         Perform encoding conversion.
         """
         y = [a]
@@ -117,27 +113,23 @@ class XBogus:
 
     def encoding_conversion2(self, a, b, c):
         """
-        第二次编码转换。
         Perform an encoding conversion on the given input values and return the result.
         """
         return chr(a) + chr(b) + c
 
     def rc4_encrypt(self, key, data):
         """
-        使用RC4算法对数据进行加密。
         Encrypt data using the RC4 algorithm.
         """
         S = list(range(256))
         j = 0
         encrypted_data = bytearray()
 
-        # 初始化 S 盒
         # Initialize the S box
         for i in range(256):
             j = (j + S[i] + key[i % len(key)]) % 256
             S[i], S[j] = S[j], S[i]
 
-        # 生成密文
         # Generate the ciphertext
         i = j = 0
         for byte in data:
@@ -151,7 +143,6 @@ class XBogus:
 
     def calculation(self, a1, a2, a3):
         """
-        对给定的输入值执行位运算计算，并返回结果。
         Perform a calculation using bitwise operations on the given input values and return the result.
         """
         x1 = (a1 & 255) << 16
@@ -166,7 +157,6 @@ class XBogus:
 
     def getXBogus(self, url_path):
         """
-        获取 X-Bogus 值。
         Get the X-Bogus value.
         """
 
