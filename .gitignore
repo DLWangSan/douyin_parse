@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.spec
+
+# 配置文件（包含敏感信息）
+config.json
+douyin_cookie.txt
+douyin_cookie copy.txt
+
+# 下载文件
+downloads/
+*.mp4
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日志
+logs/
+*.log
+
+# 临时文件
+*.tmp
+*.bak
+*.zip
+
+# 图片（如果不需要上传）
+images/
+
+# 打包文件
+*.exe
+!dist/douyin_app_full.exe
+!dist/douyin_app_slim.exe
