@@ -29,6 +29,12 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QHeaderView,
     QFileDialog,
+    QDialog,
+    QDialogButtonBox,
+    QRadioButton,
+    QButtonGroup,
+    QGroupBox,
+    QScrollArea,
 )
 
 from douyin_video_parser import DouyinVideoParser
@@ -107,6 +113,156 @@ def cookies_to_header(cookies: list[dict]) -> str:
     return "; ".join(parts)
 
 
+class QualitySelectionDialog(QDialog):
+    """Modern quality selection dialog"""
+    def __init__(self, qualities: list[dict], parent=None):
+        super().__init__(parent)
+        # Deduplicate qualities by ratio and bit_rate
+        self.qualities = self._deduplicate_qualities(qualities)
+        self.selected_quality = None
+        self.setWindowTitle("选择视频质量")
+        self.setMinimumWidth(500)
+        self.setMaximumHeight(600)  # Limit maximum height
+        self.setup_ui()
+        self._apply_style()
+    
+    def _deduplicate_qualities(self, qualities: list[dict]) -> list[dict]:
+        """Remove duplicate qualities based on ratio and bit_rate"""
+        seen = set()
+        unique_qualities = []
+        for quality in qualities:
+            ratio = quality.get("ratio", "")
+            bit_rate = quality.get("bit_rate", 0)
+            # Create a unique key
+            key = (ratio, bit_rate)
+            if key not in seen:
+                seen.add(key)
+                unique_qualities.append(quality)
+        return unique_qualities
+    
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        title = QLabel("请选择要下载的视频质量：")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; padding: 10px;")
+        layout.addWidget(title)
+        
+        # Create scroll area for quality options
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMinimumHeight(200)
+        scroll_area.setMaximumHeight(400)  # Limit scroll area height
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #2b3142;
+                border-radius: 8px;
+                background: #1b1f2a;
+            }
+            QScrollBar:vertical {
+                background: #1b1f2a;
+                width: 12px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: #3b82f6;
+                border-radius: 6px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #2563eb;
+            }
+        """)
+        
+        group = QGroupBox()
+        group_layout = QVBoxLayout(group)
+        group_layout.setSpacing(8)
+        self.button_group = QButtonGroup(self)
+        
+        if not self.qualities:
+            no_quality = QLabel("未找到可用的视频质量选项")
+            no_quality.setStyleSheet("color: #999; padding: 20px;")
+            group_layout.addWidget(no_quality)
+        else:
+            for idx, quality in enumerate(self.qualities):
+                ratio = quality.get("ratio", "未知")
+                bit_rate = quality.get("bit_rate", 0)
+                quality_label = quality.get("quality_label", ratio)
+                
+                # Create quality description
+                desc = f"{quality_label}"
+                if bit_rate > 0 and f"{bit_rate // 1000}Kbps" not in quality_label:
+                    desc += f" - {bit_rate // 1000}Kbps"
+                
+                radio = QRadioButton(desc)
+                radio.setProperty("quality", quality)
+                if idx == 0:  # Select highest quality by default
+                    radio.setChecked(True)
+                    self.selected_quality = quality
+                self.button_group.addButton(radio, idx)
+                group_layout.addWidget(radio)
+                
+                # Connect signal to update selection
+                radio.toggled.connect(lambda checked, q=quality: self._on_quality_selected(checked, q))
+        
+        group_layout.addStretch()  # Add stretch at the end
+        scroll_area.setWidget(group)
+        layout.addWidget(scroll_area)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def _on_quality_selected(self, checked: bool, quality: dict):
+        if checked:
+            self.selected_quality = quality
+    
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QDialog { background: #0f1115; color: #e6e6e6; }
+            QGroupBox { 
+                border: 2px solid #2b3142; 
+                border-radius: 8px; 
+                margin-top: 10px; 
+                padding-top: 15px;
+                background: #1b1f2a;
+            }
+            QGroupBox::title { 
+                subcontrol-origin: margin; 
+                left: 10px; 
+                padding: 0 5px;
+            }
+            QRadioButton {
+                padding: 12px;
+                font-size: 14px;
+                border-radius: 6px;
+                margin: 4px;
+            }
+            QRadioButton:hover {
+                background: #2b3142;
+            }
+            QRadioButton::indicator {
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                border: 2px solid #3b82f6;
+            }
+            QRadioButton::indicator:checked {
+                background: #3b82f6;
+            }
+            QDialogButtonBox QPushButton {
+                min-width: 80px;
+                padding: 8px 16px;
+            }
+        """)
+    
+    def get_selected_quality(self) -> dict | None:
+        return self.selected_quality
+
+
 def download_file(url: str, path: str, progress_cb=None) -> bool:
     headers = {
         "User-Agent": (
@@ -171,10 +327,11 @@ class ParseListWorker(QThread):
             self.error.emit("列表为空")
             return
         for url in self.urls:
-            meta = self.parser.parse_video_meta(url)
-            if not meta:
+            # Parse full video info including qualities
+            info = self.parser.parse_video(url)
+            if not info:
                 continue
-            payload = {"url": url, **meta}
+            payload = {"url": url, **info}
             self.result.emit(payload)
         self.done.emit()
 
@@ -212,30 +369,64 @@ class DownloadWorker(QThread):
     status = Signal(str)
     done = Signal(int, int)
 
-    def __init__(self, parser: DouyinVideoParser, urls: list[str], save_dir: str):
+    def __init__(self, parser: DouyinVideoParser, video_infos: list[dict], save_dir: str, selected_ratio: str = None):
         super().__init__()
         self.parser = parser
-        self.urls = urls
+        self.video_infos = video_infos  # List of dicts with url, qualities, etc.
         self.save_dir = save_dir
+        self.selected_ratio = selected_ratio  # Optional: filter by ratio
 
     def run(self):
         os.makedirs(self.save_dir, exist_ok=True)
         success = 0
-        total = len(self.urls)
-        for idx, url in enumerate(self.urls, start=1):
+        total = len(self.video_infos)
+        for idx, info in enumerate(self.video_infos, start=1):
             self.status.emit(f"下载中 {idx}/{total}")
-            info = self.parser.parse_video(url)
-            if not info or not info.get("nwm_url"):
+            
+            # Get video URL
+            url = info.get("url")
+            if not url:
                 continue
+            
+            # Get download URL from qualities or fallback to nwm_url
+            download_url = None
+            qualities = info.get("qualities", [])
+            
+            if qualities:
+                if self.selected_ratio:
+                    # Find quality matching selected ratio
+                    for q in qualities:
+                        if q.get("ratio") == self.selected_ratio:
+                            download_url = q.get("url")
+                            break
+                # If no match or no ratio specified, use highest quality
+                if not download_url and qualities:
+                    download_url = qualities[0].get("url")
+            
+            # Fallback to nwm_url
+            if not download_url:
+                download_url = info.get("nwm_url")
+            
+            if not download_url:
+                continue
+            
             desc = info.get("desc") or ""
             aweme_id = info.get("aweme_id") or "douyin"
-            name = safe_filename(desc, aweme_id) + ".mp4"
+            
+            # Add quality suffix to filename
+            quality_suffix = ""
+            if self.selected_ratio:
+                quality_suffix = f"_{self.selected_ratio}"
+            elif qualities:
+                quality_suffix = f"_{qualities[0].get('ratio', '')}"
+            
+            name = safe_filename(desc, aweme_id) + quality_suffix + ".mp4"
             path = os.path.join(self.save_dir, name)
 
             def _cb(p):
                 self.progress.emit(p)
 
-            ok = download_file(info["nwm_url"], path, progress_cb=_cb)
+            ok = download_file(download_url, path, progress_cb=_cb)
             if ok:
                 success += 1
         self.done.emit(success, total)
@@ -764,6 +955,11 @@ class MainWindow(QMainWindow):
         self.single_parse_btn.setEnabled(True)
 
     def _single_result(self, info: dict):
+        qualities = info.get("qualities", [])
+        qualities_text = ""
+        if qualities:
+            qualities_text = "\n可用质量: " + ", ".join([q.get("quality_label", q.get("ratio", "未知")) for q in qualities[:3]])
+        
         self.single_info.setText(
             f"ID: {info.get('aweme_id')}\n"
             f"时间: {format_time(info.get('create_time'))}\n"
@@ -771,9 +967,11 @@ class MainWindow(QMainWindow):
             f"文案: {info.get('desc')}\n"
             f"封面: {info.get('cover_url')}\n"
             f"无水印: {info.get('nwm_url')}"
+            + qualities_text
         )
-        self.single_download_btn.setEnabled(bool(info.get("nwm_url")))
+        self.single_download_btn.setEnabled(bool(info.get("nwm_url") or qualities))
         self.single_download_btn.setProperty("nwm_url", info.get("nwm_url"))
+        self.single_download_btn.setProperty("qualities", qualities)
         self.single_download_btn.setProperty("desc", info.get("desc"))
         self.single_download_btn.setProperty("aweme_id", info.get("aweme_id"))
         cover_url = info.get("cover_url")
@@ -784,13 +982,38 @@ class MainWindow(QMainWindow):
         self.single_info.setText(msg)
 
     def _on_single_download(self):
+        qualities = self.single_download_btn.property("qualities") or []
         url = self.single_download_btn.property("nwm_url")
+        
+        # Show quality selection dialog if multiple qualities available
+        selected_quality = None
+        if qualities and len(qualities) > 1:
+            dialog = QualitySelectionDialog(qualities, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            selected_quality = dialog.get_selected_quality()
+            if selected_quality:
+                url = selected_quality.get("url")
+        elif not url and qualities:
+            # Fallback to first quality if no default URL
+            url = qualities[0].get("url")
+        
         if not url:
+            QMessageBox.warning(self, "错误", "未找到可用的视频地址")
             return
+        
         os.makedirs(self.save_dir, exist_ok=True)
         desc = self.single_download_btn.property("desc") or ""
         aweme_id = self.single_download_btn.property("aweme_id") or "douyin"
-        name = safe_filename(desc, aweme_id) + ".mp4"
+        
+        # Add quality suffix to filename if selected
+        quality_suffix = ""
+        if selected_quality:
+            ratio = selected_quality.get("ratio", "")
+            if ratio:
+                quality_suffix = f"_{ratio}"
+        
+        name = safe_filename(desc, aweme_id) + quality_suffix + ".mp4"
         path = os.path.join(self.save_dir, name)
 
         self.single_progress.setVisible(True)
@@ -839,14 +1062,45 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "解析失败", msg)
 
     def _on_user_download(self):
-        urls = self._get_checked_urls(self.user_table)
-        if not urls:
+        video_infos = self._get_checked_video_infos(self.user_table)
+        if not video_infos:
+            QMessageBox.warning(self, "提示", "请先勾选要下载的视频")
             return
+        
+        # Get all available ratios from selected videos
+        available_ratios = self._get_all_available_ratios(video_infos)
+        selected_ratio = None
+        
+        # Show quality selection dialog if multiple ratios available
+        if available_ratios and len(available_ratios) > 1:
+            # Create a simplified quality list for selection
+            quality_list = []
+            for ratio in available_ratios:
+                # Find a representative quality for this ratio
+                for info in video_infos:
+                    qualities = info.get("qualities", [])
+                    for q in qualities:
+                        if q.get("ratio") == ratio:
+                            quality_list.append(q)
+                            break
+                    if any(q.get("ratio") == ratio for q in qualities):
+                        break
+            
+            if quality_list:
+                dialog = QualitySelectionDialog(quality_list, self)
+                dialog.setWindowTitle("选择批量下载的视频质量")
+                if dialog.exec() == QDialog.Accepted:
+                    selected_quality = dialog.get_selected_quality()
+                    if selected_quality:
+                        selected_ratio = selected_quality.get("ratio")
+                else:
+                    return
+        
         self.user_progress.setVisible(True)
         self.user_progress.setValue(0)
         self.user_download_btn.setEnabled(False)
 
-        self.download_worker = DownloadWorker(self.parser, urls, self.save_dir)
+        self.download_worker = DownloadWorker(self.parser, video_infos, self.save_dir, selected_ratio)
         self.download_worker.progress.connect(self.user_progress.setValue)
         self.download_worker.status.connect(lambda _: None)
         self.download_worker.done.connect(self._download_done)
@@ -863,15 +1117,27 @@ class MainWindow(QMainWindow):
             if item:
                 item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
 
-    def _get_checked_urls(self, table: QTableWidget) -> list[str]:
-        urls = []
+    def _get_checked_video_infos(self, table: QTableWidget) -> list[dict]:
+        """Get checked video info dicts instead of just URLs"""
+        infos = []
         for row in range(table.rowCount()):
             item = table.item(row, 0)
             if item and item.checkState() == Qt.Checked:
-                url = item.data(Qt.UserRole)
-                if url:
-                    urls.append(url)
-        return urls
+                info = item.data(Qt.UserRole)
+                if info and isinstance(info, dict):
+                    infos.append(info)
+        return infos
+    
+    def _get_all_available_ratios(self, video_infos: list[dict]) -> set[str]:
+        """Extract all available ratios from video infos"""
+        ratios = set()
+        for info in video_infos:
+            qualities = info.get("qualities", [])
+            for q in qualities:
+                ratio = q.get("ratio")
+                if ratio:
+                    ratios.add(ratio)
+        return sorted(ratios, key=lambda x: {"1080p": 5, "720p": 4, "540p": 3, "480p": 2, "360p": 1}.get(x, 0), reverse=True)
 
     def _append_row(self, table: QTableWidget, info: dict):
         row = table.rowCount()
@@ -880,7 +1146,8 @@ class MainWindow(QMainWindow):
 
         check_item = QTableWidgetItem()
         check_item.setCheckState(Qt.Unchecked)
-        check_item.setData(Qt.UserRole, info.get("url"))
+        # Store full info dict instead of just URL
+        check_item.setData(Qt.UserRole, info)
         table.setItem(row, 0, check_item)
 
         cover_label = QLabel()
