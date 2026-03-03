@@ -305,11 +305,41 @@ class ParseSingleWorker(QThread):
         self.url = url
 
     def run(self):
-        info = self.parser.parse_video(self.url)
-        if not info:
-            self.error.emit("解析失败")
-            return
-        self.result.emit(info)
+        try:
+            info = self.parser.parse_video(self.url)
+            if not info:
+                # Try to get more debug info
+                try:
+                    video_id = self.parser.get_video_id(self.url)
+                    if video_id:
+                        data = self.parser.get_aweme_detail(video_id)
+                        if data:
+                            aweme = data.get("aweme_detail") or {}
+                            aweme_type = aweme.get("aweme_type", "unknown")
+                            has_images = bool(aweme.get("images"))
+                            self.error.emit(f"解析失败：aweme_type={aweme_type}, 是否有images={has_images}")
+                        else:
+                            self.error.emit("解析失败：无法获取API数据，请检查Cookie是否有效")
+                    else:
+                        # Try to get the redirected URL for debugging
+                        try:
+                            import requests
+                            session = requests.Session()
+                            session.headers.update({
+                                "User-Agent": self.parser.user_agent,
+                                "Referer": "https://www.douyin.com/"
+                            })
+                            resp = session.get(self.url, allow_redirects=True, timeout=10)
+                            real_url = resp.url
+                            self.error.emit(f"解析失败：无法提取视频ID\n访问URL: {real_url}\n请确认链接是否为有效的抖音视频/图集链接")
+                        except Exception:
+                            self.error.emit("解析失败：无法提取视频ID，请确认链接格式正确")
+                except Exception as e:
+                    self.error.emit(f"解析失败：{str(e)}")
+                return
+            self.result.emit(info)
+        except Exception as e:
+            self.error.emit(f"解析失败：{str(e)}")
 
 
 class ParseListWorker(QThread):
@@ -381,55 +411,131 @@ class DownloadWorker(QThread):
         success = 0
         total = len(self.video_infos)
         for idx, info in enumerate(self.video_infos, start=1):
-            self.status.emit(f"下载中 {idx}/{total}")
+            content_type = info.get("content_type", "video")
             
-            # Get video URL
-            url = info.get("url")
-            if not url:
+            if content_type == "video":
+                ok = self._download_video(info, idx, total)
+            elif content_type == "image":
+                ok = self._download_album(info, idx, total)
+            else:
                 continue
             
-            # Get download URL from qualities or fallback to nwm_url
-            download_url = None
-            qualities = info.get("qualities", [])
-            
-            if qualities:
-                if self.selected_ratio:
-                    # Find quality matching selected ratio
-                    for q in qualities:
-                        if q.get("ratio") == self.selected_ratio:
-                            download_url = q.get("url")
-                            break
-                # If no match or no ratio specified, use highest quality
-                if not download_url and qualities:
-                    download_url = qualities[0].get("url")
-            
-            # Fallback to nwm_url
-            if not download_url:
-                download_url = info.get("nwm_url")
-            
-            if not download_url:
-                continue
-            
-            desc = info.get("desc") or ""
-            aweme_id = info.get("aweme_id") or "douyin"
-            
-            # Add quality suffix to filename
-            quality_suffix = ""
-            if self.selected_ratio:
-                quality_suffix = f"_{self.selected_ratio}"
-            elif qualities:
-                quality_suffix = f"_{qualities[0].get('ratio', '')}"
-            
-            name = safe_filename(desc, aweme_id) + quality_suffix + ".mp4"
-            path = os.path.join(self.save_dir, name)
-
-            def _cb(p):
-                self.progress.emit(p)
-
-            ok = download_file(download_url, path, progress_cb=_cb)
             if ok:
                 success += 1
         self.done.emit(success, total)
+    
+    def _download_video(self, info: dict, idx: int, total: int) -> bool:
+        """Download a single video"""
+        self.status.emit(f"下载视频 {idx}/{total}")
+        
+        # Get video URL
+        url = info.get("url")
+        if not url:
+            return False
+        
+        # Get download URL from qualities or fallback to nwm_url
+        download_url = None
+        qualities = info.get("qualities", [])
+        
+        if qualities:
+            if self.selected_ratio:
+                # Find quality matching selected ratio
+                for q in qualities:
+                    if q.get("ratio") == self.selected_ratio:
+                        download_url = q.get("url")
+                        break
+            # If no match or no ratio specified, use highest quality
+            if not download_url and qualities:
+                download_url = qualities[0].get("url")
+        
+        # Fallback to nwm_url
+        if not download_url:
+            download_url = info.get("nwm_url")
+        
+        if not download_url:
+            return False
+        
+        desc = info.get("desc") or ""
+        aweme_id = info.get("aweme_id") or "douyin"
+        
+        # Add quality suffix to filename
+        quality_suffix = ""
+        if self.selected_ratio:
+            quality_suffix = f"_{self.selected_ratio}"
+        elif qualities:
+            quality_suffix = f"_{qualities[0].get('ratio', '')}"
+        
+        name = safe_filename(desc, aweme_id) + quality_suffix + ".mp4"
+        path = os.path.join(self.save_dir, name)
+
+        def _cb(p):
+            self.progress.emit(p)
+
+        return download_file(download_url, path, progress_cb=_cb)
+    
+    def _download_album(self, info: dict, idx: int, total: int) -> bool:
+        """Download an album (multiple images)"""
+        self.status.emit(f"下载图集 {idx}/{total}")
+        
+        image_data = info.get("image_data", {})
+        image_urls = image_data.get("image_urls", [])
+        
+        if not image_urls:
+            return False
+        
+        desc = info.get("desc") or ""
+        aweme_id = info.get("aweme_id") or "douyin"
+        
+        # Create folder for album
+        folder_name = safe_filename(desc, aweme_id)
+        album_dir = os.path.join(self.save_dir, folder_name)
+        os.makedirs(album_dir, exist_ok=True)
+        
+        # Check if these are live images
+        is_live = image_data.get("is_live", False)
+        
+        success_count = 0
+        for img_idx, img_url in enumerate(image_urls, start=1):
+            try:
+                # Determine file extension first
+                url_lower = img_url.lower()
+                if is_live:
+                    # Live images are videos, save as mp4
+                    ext = ".mp4"
+                elif ("gif" in url_lower or url_lower.endswith(".gif") or ".gif?" in url_lower):
+                    ext = ".gif"
+                elif ("webp" in url_lower or url_lower.endswith(".webp") or ".webp?" in url_lower):
+                    ext = ".webp"
+                elif ("png" in url_lower or url_lower.endswith(".png") or ".png?" in url_lower):
+                    ext = ".png"
+                else:
+                    ext = ".jpg"  # Default to jpg
+                
+                img_name = f"{img_idx:03d}{ext}"
+                img_path = os.path.join(album_dir, img_name)
+                
+                # For live images (MP4 videos), use download_file function for better support
+                if is_live:
+                    def _cb(p):
+                        # Progress callback for live images
+                        pass
+                    ok = download_file(img_url, img_path, progress_cb=_cb)
+                    if ok:
+                        success_count += 1
+                else:
+                    # For static images, use simple download
+                    resp = requests.get(img_url, timeout=30, stream=True, headers={"User-Agent": self.parser.user_agent})
+                    if resp.status_code == 200:
+                        with open(img_path, "wb") as f:
+                            for chunk in resp.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                        success_count += 1
+            except Exception:
+                pass
+        
+        # Consider successful if at least one image downloaded
+        return success_count > 0
 
 
 class CookieWorker(QThread):
@@ -763,7 +869,7 @@ class MainWindow(QMainWindow):
         self.parser.set_cookie(self.config.get("cookie"))
         self.save_dir = self.config.get("save_dir", DEFAULT_SAVE_DIR)
 
-        self.setWindowTitle("抖音无水印解析器")
+        self.setWindowTitle("抖音无水印解析器 v2.0.2beta")
         self.setMinimumSize(1200, 760)
 
         tabs = QTabWidget()
@@ -923,16 +1029,17 @@ class MainWindow(QMainWindow):
         return widget
 
     def _build_table(self):
-        table = QTableWidget(0, 5)
-        table.setHorizontalHeaderLabels(["选择", "封面", "文案", "视频ID", "时间"])
+        table = QTableWidget(0, 6)
+        table.setHorizontalHeaderLabels(["选择", "封面", "类型", "文案", "视频ID", "时间"])
         table.setColumnWidth(0, 60)
         table.setColumnWidth(1, 200)
-        table.setColumnWidth(2, 420)
-        table.setColumnWidth(3, 180)
+        table.setColumnWidth(2, 100)
+        table.setColumnWidth(3, 320)
         table.setColumnWidth(4, 180)
+        table.setColumnWidth(5, 180)
         table.verticalHeader().setVisible(False)
         table.setAlternatingRowColors(True)
-        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         return table
 
     def _on_single_parse(self):
@@ -955,23 +1062,36 @@ class MainWindow(QMainWindow):
         self.single_parse_btn.setEnabled(True)
 
     def _single_result(self, info: dict):
-        qualities = info.get("qualities", [])
-        qualities_text = ""
-        if qualities:
-            qualities_text = "\n可用质量: " + ", ".join([q.get("quality_label", q.get("ratio", "未知")) for q in qualities[:3]])
+        content_type = info.get("content_type", "video")
         
-        self.single_info.setText(
+        info_text = (
             f"ID: {info.get('aweme_id')}\n"
+            f"类型: {'图集' if content_type == 'image' else '视频'}\n"
             f"时间: {format_time(info.get('create_time'))}\n"
             f"作者: {info.get('author_nickname')}\n"
             f"文案: {info.get('desc')}\n"
             f"封面: {info.get('cover_url')}\n"
-            f"无水印: {info.get('nwm_url')}"
-            + qualities_text
         )
-        self.single_download_btn.setEnabled(bool(info.get("nwm_url") or qualities))
-        self.single_download_btn.setProperty("nwm_url", info.get("nwm_url"))
-        self.single_download_btn.setProperty("qualities", qualities)
+        
+        if content_type == "video":
+            qualities = info.get("qualities", [])
+            qualities_text = ""
+            if qualities:
+                qualities_text = "\n可用质量: " + ", ".join([q.get("quality_label", q.get("ratio", "未知")) for q in qualities[:3]])
+            info_text += f"无水印: {info.get('nwm_url')}" + qualities_text
+            self.single_download_btn.setEnabled(bool(info.get("nwm_url") or qualities))
+            self.single_download_btn.setProperty("nwm_url", info.get("nwm_url"))
+            self.single_download_btn.setProperty("qualities", qualities)
+        elif content_type == "image":
+            image_count = info.get("image_count", 0)
+            image_data = info.get("image_data", {})
+            image_urls = image_data.get("image_urls", []) if image_data else []
+            info_text += f"图片数量: {image_count}张"
+            self.single_download_btn.setEnabled(bool(image_urls))
+            self.single_download_btn.setProperty("image_data", image_data)
+        
+        self.single_info.setText(info_text)
+        self.single_download_btn.setProperty("content_type", content_type)
         self.single_download_btn.setProperty("desc", info.get("desc"))
         self.single_download_btn.setProperty("aweme_id", info.get("aweme_id"))
         cover_url = info.get("cover_url")
@@ -982,49 +1102,122 @@ class MainWindow(QMainWindow):
         self.single_info.setText(msg)
 
     def _on_single_download(self):
-        qualities = self.single_download_btn.property("qualities") or []
-        url = self.single_download_btn.property("nwm_url")
+        content_type = self.single_download_btn.property("content_type") or "video"
         
-        # Show quality selection dialog if multiple qualities available
-        selected_quality = None
-        if qualities and len(qualities) > 1:
-            dialog = QualitySelectionDialog(qualities, self)
-            if dialog.exec() != QDialog.Accepted:
+        if content_type == "video":
+            # Video download
+            qualities = self.single_download_btn.property("qualities") or []
+            url = self.single_download_btn.property("nwm_url")
+            
+            # Show quality selection dialog if multiple qualities available
+            selected_quality = None
+            if qualities and len(qualities) > 1:
+                dialog = QualitySelectionDialog(qualities, self)
+                if dialog.exec() != QDialog.Accepted:
+                    return
+                selected_quality = dialog.get_selected_quality()
+                if selected_quality:
+                    url = selected_quality.get("url")
+            elif not url and qualities:
+                # Fallback to first quality if no default URL
+                url = qualities[0].get("url")
+            
+            if not url:
+                QMessageBox.warning(self, "错误", "未找到可用的视频地址")
                 return
-            selected_quality = dialog.get_selected_quality()
+            
+            os.makedirs(self.save_dir, exist_ok=True)
+            desc = self.single_download_btn.property("desc") or ""
+            aweme_id = self.single_download_btn.property("aweme_id") or "douyin"
+            
+            # Add quality suffix to filename if selected
+            quality_suffix = ""
             if selected_quality:
-                url = selected_quality.get("url")
-        elif not url and qualities:
-            # Fallback to first quality if no default URL
-            url = qualities[0].get("url")
-        
-        if not url:
-            QMessageBox.warning(self, "错误", "未找到可用的视频地址")
-            return
-        
-        os.makedirs(self.save_dir, exist_ok=True)
-        desc = self.single_download_btn.property("desc") or ""
-        aweme_id = self.single_download_btn.property("aweme_id") or "douyin"
-        
-        # Add quality suffix to filename if selected
-        quality_suffix = ""
-        if selected_quality:
-            ratio = selected_quality.get("ratio", "")
-            if ratio:
-                quality_suffix = f"_{ratio}"
-        
-        name = safe_filename(desc, aweme_id) + quality_suffix + ".mp4"
-        path = os.path.join(self.save_dir, name)
+                ratio = selected_quality.get("ratio", "")
+                if ratio:
+                    quality_suffix = f"_{ratio}"
+            
+            name = safe_filename(desc, aweme_id) + quality_suffix + ".mp4"
+            path = os.path.join(self.save_dir, name)
 
-        self.single_progress.setVisible(True)
-        self.single_progress.setValue(0)
+            self.single_progress.setVisible(True)
+            self.single_progress.setValue(0)
 
-        def _cb(p):
-            self.single_progress.setValue(p)
+            def _cb(p):
+                self.single_progress.setValue(p)
 
-        ok = download_file(url, path, progress_cb=_cb)
-        QMessageBox.information(self, "下载", "完成" if ok else "失败")
-        self.single_progress.setVisible(False)
+            ok = download_file(url, path, progress_cb=_cb)
+            QMessageBox.information(self, "下载", "完成" if ok else "失败")
+            self.single_progress.setVisible(False)
+        
+        elif content_type == "image":
+            # Album download
+            image_data = self.single_download_btn.property("image_data") or {}
+            image_urls = image_data.get("image_urls", [])
+            
+            if not image_urls:
+                QMessageBox.warning(self, "错误", "未找到可用的图片地址")
+                return
+            
+            os.makedirs(self.save_dir, exist_ok=True)
+            desc = self.single_download_btn.property("desc") or ""
+            aweme_id = self.single_download_btn.property("aweme_id") or "douyin"
+            
+            # Create folder for album
+            folder_name = safe_filename(desc, aweme_id)
+            album_dir = os.path.join(self.save_dir, folder_name)
+            os.makedirs(album_dir, exist_ok=True)
+            
+            self.single_progress.setVisible(True)
+            self.single_progress.setRange(0, len(image_urls))
+            self.single_progress.setValue(0)
+            
+            # Check if these are live images
+            is_live = image_data.get("is_live", False)
+            
+            success = 0
+            for idx, img_url in enumerate(image_urls, start=1):
+                try:
+                    # Determine file extension first
+                    url_lower = img_url.lower()
+                    if is_live:
+                        # Live images are videos, save as mp4
+                        ext = ".mp4"
+                    elif ("gif" in url_lower or url_lower.endswith(".gif") or ".gif?" in url_lower):
+                        ext = ".gif"
+                    elif ("webp" in url_lower or url_lower.endswith(".webp") or ".webp?" in url_lower):
+                        ext = ".webp"
+                    elif ("png" in url_lower or url_lower.endswith(".png") or ".png?" in url_lower):
+                        ext = ".png"
+                    else:
+                        ext = ".jpg"  # Default to jpg
+                    
+                    img_name = f"{idx:03d}{ext}"
+                    img_path = os.path.join(album_dir, img_name)
+                    
+                    # For live images (MP4 videos), use download_file function for better support
+                    if is_live:
+                        def _cb(p):
+                            self.single_progress.setValue(int((idx - 1) * 100 / len(image_urls) + p / len(image_urls)))
+                        ok = download_file(img_url, img_path, progress_cb=_cb)
+                        if ok:
+                            success += 1
+                    else:
+                        # For static images, use simple download
+                        resp = requests.get(img_url, timeout=30, stream=True, headers={"User-Agent": self.parser.user_agent})
+                        if resp.status_code == 200:
+                            with open(img_path, "wb") as f:
+                                for chunk in resp.iter_content(chunk_size=8192):
+                                    if chunk:
+                                        f.write(chunk)
+                            success += 1
+                except Exception:
+                    pass
+                
+                self.single_progress.setValue(idx)
+            
+            QMessageBox.information(self, "下载", f"完成 {success}/{len(image_urls)}")
+            self.single_progress.setVisible(False)
 
     def _on_user_parse(self):
         url = self.user_input.text().strip()
@@ -1064,37 +1257,40 @@ class MainWindow(QMainWindow):
     def _on_user_download(self):
         video_infos = self._get_checked_video_infos(self.user_table)
         if not video_infos:
-            QMessageBox.warning(self, "提示", "请先勾选要下载的视频")
+            QMessageBox.warning(self, "提示", "请先勾选要下载的内容")
             return
         
-        # Get all available ratios from selected videos
-        available_ratios = self._get_all_available_ratios(video_infos)
+        # Filter videos only for quality selection
+        video_only_infos = [info for info in video_infos if info.get("content_type", "video") == "video"]
         selected_ratio = None
         
-        # Show quality selection dialog if multiple ratios available
-        if available_ratios and len(available_ratios) > 1:
-            # Create a simplified quality list for selection
-            quality_list = []
-            for ratio in available_ratios:
-                # Find a representative quality for this ratio
-                for info in video_infos:
-                    qualities = info.get("qualities", [])
-                    for q in qualities:
-                        if q.get("ratio") == ratio:
-                            quality_list.append(q)
-                            break
-                    if any(q.get("ratio") == ratio for q in qualities):
-                        break
+        # Show quality selection dialog only if there are videos with multiple ratios
+        if video_only_infos:
+            available_ratios = self._get_all_available_ratios(video_only_infos)
             
-            if quality_list:
-                dialog = QualitySelectionDialog(quality_list, self)
-                dialog.setWindowTitle("选择批量下载的视频质量")
-                if dialog.exec() == QDialog.Accepted:
-                    selected_quality = dialog.get_selected_quality()
-                    if selected_quality:
-                        selected_ratio = selected_quality.get("ratio")
-                else:
-                    return
+            if available_ratios and len(available_ratios) > 1:
+                # Create a simplified quality list for selection
+                quality_list = []
+                for ratio in available_ratios:
+                    # Find a representative quality for this ratio
+                    for info in video_only_infos:
+                        qualities = info.get("qualities", [])
+                        for q in qualities:
+                            if q.get("ratio") == ratio:
+                                quality_list.append(q)
+                                break
+                        if any(q.get("ratio") == ratio for q in qualities):
+                            break
+                
+                if quality_list:
+                    dialog = QualitySelectionDialog(quality_list, self)
+                    dialog.setWindowTitle("选择批量下载的视频质量")
+                    if dialog.exec() == QDialog.Accepted:
+                        selected_quality = dialog.get_selected_quality()
+                        if selected_quality:
+                            selected_ratio = selected_quality.get("ratio")
+                    else:
+                        return
         
         self.user_progress.setVisible(True)
         self.user_progress.setValue(0)
@@ -1158,9 +1354,23 @@ class MainWindow(QMainWindow):
             self._set_cover(cover_label, info["cover_url"], 180, 100)
         table.setCellWidget(row, 1, cover_label)
 
-        table.setItem(row, 2, QTableWidgetItem(info.get("desc") or ""))
-        table.setItem(row, 3, QTableWidgetItem(info.get("aweme_id") or ""))
-        table.setItem(row, 4, QTableWidgetItem(format_time(info.get("create_time"))))
+        # Content type column
+        content_type = info.get("content_type", "video")
+        type_text = "视频"
+        if content_type == "image":
+            image_count = info.get("image_count", 0)
+            type_text = f"图集({image_count}张)"
+        
+        type_item = QTableWidgetItem(type_text)
+        if content_type == "image":
+            # Green background for albums
+            type_item.setBackground(Qt.GlobalColor.darkGreen)
+            type_item.setForeground(Qt.GlobalColor.white)
+        table.setItem(row, 2, type_item)
+
+        table.setItem(row, 3, QTableWidgetItem(info.get("desc") or ""))
+        table.setItem(row, 4, QTableWidgetItem(info.get("aweme_id") or ""))
+        table.setItem(row, 5, QTableWidgetItem(format_time(info.get("create_time"))))
 
     def _set_cover(self, label: QLabel, url: str, w: int, h: int):
         try:

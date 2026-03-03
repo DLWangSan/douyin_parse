@@ -45,6 +45,7 @@ class DouyinVideoParser:
             r'https?://[^\s]+',  # 标准URL
             r'v\.douyin\.com/[^\s]+',  # 短链接
             r'douyin\.com/video/\d+',  # 直接视频链接
+            r'douyin\.com/aweme/detail/\d+',  # aweme detail链接
         ]
         
         extracted_url = None
@@ -60,28 +61,66 @@ class DouyinVideoParser:
             # 如果没有匹配到，尝试直接使用原字符串
             extracted_url = share_url.strip()
         
-        # 如果已经是完整URL格式，直接提取ID
-        direct_match = re.search(r'/video/(\d+)', extracted_url)
-        if direct_match:
-            return direct_match.group(1)
+        # Method 1: 如果已经是完整URL格式，直接提取ID
+        # 支持 /video/, /aweme/detail/, /note/ 等格式
+        patterns = [
+            r'/video/(\d+)',
+            r'/aweme/detail/(\d+)',
+            r'/note/(\d+)',  # Note/album format
+            r'video_id=(\d+)',
+            r'aweme_id=(\d+)',
+            r'note_id=(\d+)',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, extracted_url)
+            if match:
+                return match.group(1)
         
-        # 否则尝试访问并获取重定向后的URL
+        # Method 2: 尝试访问并获取重定向后的URL
         session = requests.Session()
         session.headers.update({
             "User-Agent": self.user_agent,
             "Referer": "https://www.douyin.com/"
         })
         try:
-            resp = session.get(extracted_url, allow_redirects=True, timeout=10)
+            resp = session.get(extracted_url, allow_redirects=True, timeout=15)
             real_url = resp.url
-            match = re.search(r'/video/(\d+)', real_url)
-            if match:
-                return match.group(1)
+            
+            # 从重定向后的URL提取ID
+            for pattern in patterns:
+                match = re.search(pattern, real_url)
+                if match:
+                    return match.group(1)
+            
+            # Method 3: 从页面HTML内容中提取视频ID
+            # 尝试多种可能的字段名
+            html_content = resp.text
+            id_patterns = [
+                r'"aweme_id":"(\d+)"',
+                r'"itemId":"(\d+)"',
+                r'"video_id":"(\d+)"',
+                r'"note_id":"(\d+)"',
+                r'/video/(\d+)',
+                r'/aweme/detail/(\d+)',
+                r'/note/(\d+)',  # Note format
+                r'aweme_id=(\d+)',
+                r'video_id=(\d+)',
+                r'note_id=(\d+)',
+            ]
+            for pattern in id_patterns:
+                match = re.search(pattern, html_content)
+                if match:
+                    video_id = match.group(1)
+                    # 验证ID是否为纯数字且长度合理（通常19位）
+                    if video_id.isdigit() and len(video_id) >= 15:
+                        return video_id
+            
             return None
-        except Exception:
+        except Exception as e:
+            # 如果请求失败，返回None
             return None
 
-    def get_aweme_detail(self, video_id: str) -> dict | None:
+    def get_aweme_detail(self, video_id: str, original_url: str = None) -> dict | None:
         if ABogus is None:
             return None
 
@@ -113,16 +152,32 @@ class DouyinVideoParser:
         except Exception:
             return None
 
+        # Determine referer: check if original_url contains /note/ or try both
+        is_note = False
+        if original_url:
+            is_note = "/note/" in original_url
+        # Try video referer first, if fails, try note referer
+        referer = f"https://www.douyin.com/video/{video_id}"
+        if is_note:
+            referer = f"https://www.douyin.com/note/{video_id}"
+        
         headers = {
             "User-Agent": self.user_agent,
-            "Referer": f"https://www.douyin.com/video/{video_id}",
+            "Referer": referer,
             "Accept": "application/json, text/plain, */*",
         }
         if self.cookie:
             headers["Cookie"] = self.cookie
 
         api_url = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
-        return self._request_json(api_url, params, headers)
+        result = self._request_json(api_url, params, headers)
+        
+        # If failed and not note referer, try note referer
+        if not result and not is_note:
+            headers["Referer"] = f"https://www.douyin.com/note/{video_id}"
+            result = self._request_json(api_url, params, headers)
+        
+        return result
 
     def _request_json(self, api_url: str, params: dict, headers: dict) -> dict | None:
         # 先试 a_bogus
@@ -148,6 +203,219 @@ class DouyinVideoParser:
 
         return None
 
+    @staticmethod
+    def get_content_type(data: dict) -> str:
+        """Determine content type based on aweme_type"""
+        aweme = data.get("aweme_detail") or {}
+        aweme_type = aweme.get("aweme_type", 0)
+        # Video: 0 or 4, Album: 2, 68, or other image types
+        # Also check if images field exists (for live albums or other types)
+        if aweme_type in (0, 4):
+            return "video"
+        elif aweme_type in (2, 68):
+            return "image"
+        # Check if images field exists (for live albums or other special types)
+        elif aweme.get("images"):
+            return "image"
+        return "video"  # Default to video
+    
+    @staticmethod
+    def extract_image_data(data: dict) -> dict | None:
+        """Extract album image URLs (including live images/GIFs)"""
+        aweme = data.get("aweme_detail") or {}
+        images = aweme.get("images") or []
+        
+        if not images:
+            return None
+        
+        # Separate live images and static images
+        live_urls_set = set()  # GIF/live images
+        static_urls_set = set()  # Static images
+        watermark_urls_set = set()  # Watermarked images
+        
+        for img in images:
+            if not isinstance(img, dict):
+                continue
+            
+            # Check if this image is marked as animated/live
+            # Key indicators: live_photo_type, clip_type, or video field exists
+            live_photo_type = img.get("live_photo_type", 0)
+            clip_type = img.get("clip_type", 0)
+            has_video = bool(img.get("video"))
+            
+            is_animated_flag = (
+                live_photo_type == 1 or
+                clip_type == 5 or
+                has_video or
+                img.get("is_animated") == True or
+                img.get("is_animated") == 1 or
+                img.get("animated") == True or
+                img.get("animated") == 1 or
+                img.get("image_type") == "animated" or
+                img.get("type") == "animated" or
+                img.get("format") == "gif" or
+                str(img.get("image_type", "")).lower() == "live"
+            )
+            
+            # Priority 0: Extract video URL from video field (for live images)
+            # If this is a live image with video, ONLY extract video URL, skip static images
+            if has_video and is_animated_flag:
+                video_obj = img.get("video", {})
+                # Try play_addr first (watermark-free)
+                play_addr = video_obj.get("play_addr", {})
+                play_url_list = play_addr.get("url_list", [])
+                if play_url_list:
+                    # Use first URL and skip all other processing for this image
+                    url = play_url_list[0]
+                    if url and isinstance(url, str):
+                        # Remove watermark parameters if present
+                        clean_url = url.split("&watermark=")[0].split("&logo_name=")[0]
+                        live_urls_set.add(clean_url)
+                        continue  # Skip to next image, don't process static URLs
+                # Fallback to download_addr (but remove watermark)
+                download_addr = video_obj.get("download_addr", {})
+                download_url_list = download_addr.get("url_list", [])
+                if download_url_list:
+                    url = download_url_list[0]
+                    if url and isinstance(url, str):
+                        # Remove watermark parameters
+                        clean_url = url.split("&watermark=")[0].split("&logo_name=")[0]
+                        live_urls_set.add(clean_url)
+                        continue  # Skip to next image
+            
+            # Priority 1: Try animated/live image fields (highest priority for live images)
+            animated_fields = [
+                "animated_url_list",
+                "animated_url",
+                "gif_url_list",
+                "gif_url",
+                "live_url_list",
+                "live_url",
+                "motion_url_list",
+                "motion_url",
+            ]
+            for field in animated_fields:
+                url_data = img.get(field)
+                if url_data:
+                    if isinstance(url_data, str):
+                        if url_data:
+                            live_urls_set.add(url_data)
+                    elif isinstance(url_data, list):
+                        for url in url_data:
+                            if url and isinstance(url, str):
+                                live_urls_set.add(url)
+            
+            # Priority 2: Try url_list (static images, watermark-free)
+            # Only process if NOT a live image with video (already handled above)
+            if not (has_video and is_animated_flag):
+                url_list = img.get("url_list") or []
+                # Only take first URL to avoid duplicates
+                if url_list:
+                    url = url_list[0]
+                    if url and isinstance(url, str):
+                        url_lower = url.lower()
+                        # Check if URL contains gif/webp animation indicators or parameters
+                        is_live_indicator = (
+                            is_animated_flag or
+                            any(indicator in url_lower for indicator in [".gif", "gif", "animated", "motion", "live"]) or
+                            "format=gif" in url_lower or
+                            "animated=1" in url_lower or
+                            "motion=1" in url_lower or
+                            "type=animated" in url_lower or
+                            "is_animated=1" in url_lower
+                        )
+                        if is_live_indicator:
+                            live_urls_set.add(url)
+                        else:
+                            static_urls_set.add(url)
+            
+            # Priority 3: Try download_url_list (may have watermark)
+            # Only process if NOT a live image with video
+            if not (has_video and is_animated_flag):
+                download_list = img.get("download_url_list") or []
+                # Only take first URL to avoid duplicates
+                if download_list:
+                    url = download_list[0]
+                    if url and isinstance(url, str):
+                        watermark_urls_set.add(url)
+            
+            # Priority 4: Try other possible fields (only if not live image with video)
+            if not (has_video and is_animated_flag):
+                for field in ["url", "origin_url"]:
+                    url = img.get(field)
+                    if url:
+                        if isinstance(url, str):
+                            url_lower = url.lower()
+                            is_live_indicator = (
+                                is_animated_flag or
+                                any(indicator in url_lower for indicator in [".gif", "gif", "animated", "motion", "live"]) or
+                                "format=gif" in url_lower or
+                                "animated=1" in url_lower or
+                                "motion=1" in url_lower or
+                                "type=animated" in url_lower or
+                                "is_animated=1" in url_lower
+                            )
+                            if is_live_indicator:
+                                live_urls_set.add(url)
+                            elif url not in static_urls_set and url not in watermark_urls_set:
+                                static_urls_set.add(url)
+                        elif isinstance(url, list) and url:
+                            # Only take first URL to avoid duplicates
+                            u = url[0]
+                            if u and isinstance(u, str):
+                                url_lower = u.lower()
+                                is_live_indicator = (
+                                    any(indicator in url_lower for indicator in [".gif", "gif", "animated", "motion", "live"]) or
+                                    "format=gif" in url_lower or
+                                    "animated=1" in url_lower or
+                                    "motion=1" in url_lower or
+                                    "type=animated" in url_lower or
+                                    "is_animated=1" in url_lower
+                                )
+                                if is_live_indicator:
+                                    live_urls_set.add(u)
+                                elif u not in static_urls_set and u not in watermark_urls_set:
+                                    static_urls_set.add(u)
+        
+        # Convert sets to lists
+        live_urls = list(live_urls_set)
+        static_urls = list(static_urls_set)
+        watermark_urls = list(watermark_urls_set)
+        
+        # Priority: Use live URLs (video) if available, otherwise use static URLs, finally fallback to watermarked
+        # For live images, we want the video, not the static image
+        if live_urls:
+            final_urls = live_urls
+            is_live = True
+        elif static_urls:
+            final_urls = static_urls
+            is_live = False
+        elif watermark_urls:
+            final_urls = watermark_urls
+            is_live = False
+        else:
+            return None
+        
+        # Final deduplication: remove URLs that are duplicates when query params are removed
+        seen_clean = set()
+        deduplicated_urls = []
+        for url in final_urls:
+            clean_url = url.split("?")[0] if "?" in url else url
+            if clean_url not in seen_clean:
+                seen_clean.add(clean_url)
+                deduplicated_urls.append(url)
+        
+        if not deduplicated_urls:
+            return None
+        
+        return {
+            "image_urls": deduplicated_urls,
+            "image_urls_watermark": watermark_urls,
+            "image_count": len(deduplicated_urls),
+            "preview_url": deduplicated_urls[0] if deduplicated_urls else None,
+            "is_live": is_live,  # Indicate if these are live images (video URLs)
+        }
+    
     @staticmethod
     def extract_nwm_url(data: dict) -> str | None:
         """Extract single watermark-free URL (backward compatibility)"""
@@ -277,47 +545,88 @@ class DouyinVideoParser:
         video = aweme.get("video") or {}
         cover = video.get("cover") or {}
         cover_list = cover.get("url_list") or []
-        return {
+        
+        # Determine content type
+        content_type = DouyinVideoParser.get_content_type(data)
+        
+        meta = {
             "aweme_id": aweme.get("aweme_id"),
             "desc": aweme.get("desc"),
             "create_time": aweme.get("create_time"),
             "author_nickname": author.get("nickname"),
             "author_sec_uid": author.get("sec_uid"),
             "cover_url": cover_list[0] if cover_list else None,
+            "content_type": content_type,
         }
+        
+        # Add image data for albums
+        if content_type == "image":
+            image_data = DouyinVideoParser.extract_image_data(data)
+            if image_data:
+                meta["image_count"] = image_data.get("image_count", 0)
+                meta["image_urls"] = image_data.get("image_urls", [])
+                # Use first image as cover if no video cover
+                if not meta["cover_url"] and image_data.get("preview_url"):
+                    meta["cover_url"] = image_data["preview_url"]
+        
+        return meta
 
     def parse_to_nwm_url(self, share_url: str) -> str | None:
         video_id = self.get_video_id(share_url)
         if not video_id:
             return None
-        data = self.get_aweme_detail(video_id)
+        data = self.get_aweme_detail(video_id, original_url=share_url)
         if not data:
             return None
         return self.extract_nwm_url(data)
 
     def parse_video(self, share_url: str) -> dict | None:
-        """返回完整解析结果（无水印地址 + 基本信息 + 所有质量选项）"""
+        """返回完整解析结果（无水印地址 + 基本信息 + 所有质量选项/图集数据）"""
         video_id = self.get_video_id(share_url)
         if not video_id:
             return None
-        data = self.get_aweme_detail(video_id)
+        
+        data = self.get_aweme_detail(video_id, original_url=share_url)
         if not data:
             return None
-        nwm_url = self.extract_nwm_url(data)
-        qualities = self.extract_video_qualities(data)
+        
         meta = self.extract_video_meta(data)
-        return {
-            "nwm_url": nwm_url,
-            "qualities": qualities,
-            **meta,
-        }
+        content_type = meta.get("content_type", "video")
+        
+        result = {**meta}
+        
+        if content_type == "video":
+            # Video: return nwm_url and qualities
+            nwm_url = self.extract_nwm_url(data)
+            qualities = self.extract_video_qualities(data)
+            result["nwm_url"] = nwm_url
+            result["qualities"] = qualities
+            # If no video data found, return None
+            if not nwm_url and not qualities:
+                return None
+        elif content_type == "image":
+            # Album: return image_data
+            image_data = self.extract_image_data(data)
+            if image_data:
+                result["image_data"] = image_data
+            else:
+                # Debug: Check what fields are available
+                aweme = data.get("aweme_detail") or {}
+                aweme_type = aweme.get("aweme_type", 0)
+                has_images = bool(aweme.get("images"))
+                # If identified as image but no image data found, return None
+                # But first try to see if we can extract from other structures
+                # Some live albums might have different structure
+                return None
+        
+        return result
 
     def parse_video_meta(self, share_url: str) -> dict | None:
         """仅解析视频基础信息（不计算无水印地址）"""
         video_id = self.get_video_id(share_url)
         if not video_id:
             return None
-        data = self.get_aweme_detail(video_id)
+        data = self.get_aweme_detail(video_id, original_url=share_url)
         if not data:
             return None
         return self.extract_video_meta(data)
@@ -326,7 +635,7 @@ class DouyinVideoParser:
         video_id = self.get_video_id(share_url)
         if not video_id:
             return None
-        data = self.get_aweme_detail(video_id)
+        data = self.get_aweme_detail(video_id, original_url=share_url)
         if not data:
             return None
         aweme = data.get("aweme_detail") or {}
