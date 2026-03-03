@@ -237,6 +237,4 @@ MIT License
 
 **⭐ 如果这个工具对你有帮助，欢迎给个Star！**
 
-## 📈 Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=DLWangSan/douyin_parse&type=Date)](https://star-history.com/#DLWangSan/douyin_parse&Date)
+## 📈 Star History[![Star History Chart](https://api.star-history.com/svg?repos=DLWangSan/douyin_parse&type=Date)](https://star-history.com/#DLWangSan/douyin_parse&Date)
