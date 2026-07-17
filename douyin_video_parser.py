@@ -5,27 +5,52 @@ Input: share URL, Output: watermark-free video URL
 
 import re
 import requests
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 try:
     from abogus import ABogus
-except Exception:
+except Exception as e:
     ABogus = None
+    print(f"[warn] ABogus 导入失败（请安装 gmssl）: {e}")
 
 try:
     from xbogus import XBogus
-except Exception:
+except Exception as e:
     XBogus = None
+    print(f"[warn] XBogus 导入失败: {e}")
 
 
 class DouyinVideoParser:
+    # 与 video_parse_api 保持一致的基础请求参数
+    BASE_PARAMS = {
+        "device_platform": "webapp",
+        "aid": "6383",
+        "channel": "channel_pc_web",
+        "pc_client_type": "1",
+        "version_code": "190500",
+        "version_name": "19.5.0",
+        "cookie_enabled": "true",
+        "browser_language": "zh-CN",
+        "browser_platform": "Win32",
+        "browser_name": "Edge",
+        "browser_online": "true",
+        "engine_name": "Blink",
+        "os_name": "Windows",
+        "os_version": "10",
+        "platform": "PC",
+        "screen_width": "1920",
+        "screen_height": "1080",
+    }
+
     def __init__(self):
         self.user_agent = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/90.0.4430.212 Safari/537.36"
+            "Chrome/130.0.0.0 Safari/537.36"
         )
         self.cookie = self._load_cookie()
+        self.abogus = ABogus() if ABogus is not None else None
+        self.xbogus = XBogus(self.user_agent) if XBogus is not None else None
 
     @staticmethod
     def _load_cookie():
@@ -120,84 +145,83 @@ class DouyinVideoParser:
             # 如果请求失败，返回None
             return None
 
-    def get_aweme_detail(self, video_id: str, original_url: str = None) -> dict | None:
-        if ABogus is None:
-            return None
-
-        params = {
-            "device_platform": "webapp",
-            "aid": "6383",
-            "channel": "channel_pc_web",
-            "aweme_id": video_id,
-            "pc_client_type": "1",
-            "version_code": "290100",
-            "version_name": "29.1.0",
-            "cookie_enabled": "true",
-            "browser_language": "zh-CN",
-            "browser_platform": "Win32",
-            "browser_name": "Chrome",
-            "browser_version": "130.0.0.0",
-            "browser_online": "true",
-            "engine_name": "Blink",
-            "engine_version": "130.0.0.0",
-            "os_name": "Windows",
-            "os_version": "10",
-            "platform": "PC",
-            "msToken": "",
-        }
-
-        try:
-            a_bogus = ABogus().get_value(params)
-            params["a_bogus"] = quote(a_bogus, safe="")
-        except Exception:
-            return None
-
-        # Determine referer: check if original_url contains /note/ or try both
-        is_note = False
-        if original_url:
-            is_note = "/note/" in original_url
-        # Try video referer first, if fails, try note referer
-        referer = f"https://www.douyin.com/video/{video_id}"
-        if is_note:
-            referer = f"https://www.douyin.com/note/{video_id}"
-        
+    def _build_headers(self, referer: str = "https://www.douyin.com/") -> dict:
         headers = {
             "User-Agent": self.user_agent,
-            "Referer": referer,
             "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": referer,
+            "Origin": "https://www.douyin.com",
+            "Sec-Fetch-Site": "same-site",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
         }
         if self.cookie:
             headers["Cookie"] = self.cookie
+        return headers
 
+    def _sign_abogus_url(self, base_url: str, params: dict) -> str | None:
+        """按 video_parse_api 方式签名：先 urlencode，再拼 a_bogus，避免二次编码。"""
+        if self.abogus is None:
+            return None
+        try:
+            param_str = urlencode(params)
+            a_bogus = self.abogus.get_value(params)
+            return f"{base_url}?{param_str}&a_bogus={quote(a_bogus, safe='')}"
+        except Exception:
+            return None
+
+    def get_aweme_detail(self, video_id: str, original_url: str = None) -> dict | None:
+        if self.abogus is None:
+            return None
+
+        params = self.BASE_PARAMS.copy()
+        params["aweme_id"] = video_id
+
+        is_note = bool(original_url and "/note/" in original_url)
+        referer = (
+            f"https://www.douyin.com/note/{video_id}"
+            if is_note
+            else f"https://www.douyin.com/video/{video_id}"
+        )
+        headers = self._build_headers(referer)
         api_url = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
         result = self._request_json(api_url, params, headers)
-        
-        # If failed and not note referer, try note referer
+
         if not result and not is_note:
             headers["Referer"] = f"https://www.douyin.com/note/{video_id}"
             result = self._request_json(api_url, params, headers)
-        
+
+        # status_code=0 但内容被过滤/删除时，视为失败
+        if result and not result.get("aweme_detail"):
+            return None
         return result
 
     def _request_json(self, api_url: str, params: dict, headers: dict) -> dict | None:
-        # 先试 a_bogus
-        try:
-            resp = requests.get(api_url, params=params, headers=headers, timeout=10)
-            if resp.status_code == 200 and resp.content:
-                return resp.json()
-        except Exception:
-            pass
+        # 先试 A-Bogus（完整 URL，避免 requests 对 a_bogus 二次编码）
+        signed_url = self._sign_abogus_url(api_url, params)
+        if signed_url:
+            try:
+                resp = requests.get(signed_url, headers=headers, timeout=15)
+                if resp.status_code == 200 and resp.content:
+                    data = resp.json()
+                    if isinstance(data, dict) and data.get("status_code") == 0:
+                        return data
+            except Exception:
+                pass
 
         # 再试 X-Bogus
-        if XBogus is None:
+        if self.xbogus is None:
             return None
         try:
-            param_str = "&".join([f"{k}={v}" for k, v in params.items()])
-            xb_value = XBogus(self.user_agent).getXBogus(param_str)
-            xb_url = f"{api_url}?{param_str}&X-Bogus={xb_value[1]}"
-            resp = requests.get(xb_url, headers=headers, timeout=10)
+            param_str = urlencode(params)
+            signed_path, _, _ = self.xbogus.get_xbogus(param_str)
+            xb_url = f"{api_url}?{signed_path}"
+            resp = requests.get(xb_url, headers=headers, timeout=15)
             if resp.status_code == 200 and resp.content:
-                return resp.json()
+                data = resp.json()
+                if isinstance(data, dict) and data.get("status_code") == 0:
+                    return data
         except Exception:
             return None
 
@@ -701,13 +725,7 @@ class DouyinVideoParser:
         if not sec_uid:
             return []
 
-        headers = {
-            "User-Agent": self.user_agent,
-            "Referer": "https://www.douyin.com/",
-            "Accept": "application/json, text/plain, */*",
-        }
-        if self.cookie:
-            headers["Cookie"] = self.cookie
+        headers = self._build_headers("https://www.douyin.com/")
 
         api_url = "https://www.douyin.com/aweme/v1/web/aweme/post/"
         max_cursor = 0
@@ -715,10 +733,8 @@ class DouyinVideoParser:
         seen = set()
 
         for _ in range(max_pages):
-            params = {
-                "device_platform": "webapp",
-                "aid": "6383",
-                "channel": "channel_pc_web",
+            params = self.BASE_PARAMS.copy()
+            params.update({
                 "sec_user_id": sec_uid,
                 "max_cursor": str(max_cursor),
                 "count": str(count),
@@ -729,35 +745,7 @@ class DouyinVideoParser:
                 "whale_cut_token": "",
                 "cut_version": "1",
                 "publish_video_strategy_type": "2",
-                "pc_client_type": "1",
-                "version_code": "290100",
-                "version_name": "29.1.0",
-                "cookie_enabled": "true",
-                "screen_width": "1920",
-                "screen_height": "1080",
-                "browser_language": "zh-CN",
-                "browser_platform": "Win32",
-                "browser_name": "Chrome",
-                "browser_version": "130.0.0.0",
-                "browser_online": "true",
-                "engine_name": "Blink",
-                "engine_version": "130.0.0.0",
-                "os_name": "Windows",
-                "os_version": "10",
-                "cpu_core_num": "12",
-                "device_memory": "8",
-                "platform": "PC",
-                "downlink": "10",
-                "effective_type": "4g",
-                "round_trip_time": "50",
-                "msToken": "",
-            }
-            if ABogus is not None:
-                try:
-                    a_bogus = ABogus().get_value(params)
-                    params["a_bogus"] = quote(a_bogus, safe="")
-                except Exception:
-                    pass
+            })
 
             data = self._request_json(api_url, params, headers)
             if not data:

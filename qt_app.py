@@ -268,7 +268,7 @@ def download_file(url: str, path: str, progress_cb=None) -> bool:
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/90.0.4430.212 Safari/537.36"
+            "Chrome/130.0.0.0 Safari/537.36"
         ),
         "Referer": "https://www.douyin.com/",
         "Origin": "https://www.douyin.com",
@@ -869,7 +869,7 @@ class MainWindow(QMainWindow):
         self.parser.set_cookie(self.config.get("cookie"))
         self.save_dir = self.config.get("save_dir", DEFAULT_SAVE_DIR)
 
-        self.setWindowTitle("抖音无水印解析器 v2.0.2beta")
+        self.setWindowTitle("抖音无水印解析器 v2.0.3")
         self.setMinimumSize(1200, 760)
 
         tabs = QTabWidget()

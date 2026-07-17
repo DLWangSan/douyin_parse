@@ -79,7 +79,7 @@ git clone <repository-url>
 cd dy_cursor
 
 # 2. 安装依赖
-pip install requests PySide6 playwright
+pip install requests PySide6 playwright gmssl
 
 # 3. 安装Playwright浏览器（仅完整版需要）
 playwright install chromium
@@ -217,6 +217,11 @@ dy_cursor/
 - 尝试减少最大页数
 
 ## 📝 更新日志
+
+### v2.0.3 (2026-07-16) - 修复解析算法 🔧
+- 🔧 **算法修复**：同步最新 `a_bogus` / `X-Bogus` 签名实现
+- 🔧 **签名修复**：修复 `a_bogus` 二次 URL 编码导致请求失败的问题
+- 🔧 **API 对齐**：更新抖音 Web API 请求参数与请求头
 
 ### v2.0.2beta (2026-03-03) - 图集下载功能 🖼️
 - ✨ **图集下载支持**：新增图片图集下载功能

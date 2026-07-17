@@ -3,7 +3,8 @@ from douyin_video_parser import DouyinVideoParser, get_nwm_url
 
 # Demo: Single video download
 def demo_single_video():
-    video_url = "https://v.douyin.com/pEkgDrA5nsk"
+    # 可换成任意公开视频分享链接
+    video_url = "https://www.douyin.com/video/7534291258635816251"
     parser = DouyinVideoParser()
     info = parser.parse_video(video_url)
     print(info)
