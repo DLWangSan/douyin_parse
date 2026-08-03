@@ -113,6 +113,139 @@ def cookies_to_header(cookies: list[dict]) -> str:
     return "; ".join(parts)
 
 
+DOUYIN_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/130.0.0.0 Safari/537.36"
+)
+
+QR_SELECTORS = [
+    ".qrcode-img img",
+    "img[aria-label*='二维码']",
+    "img.RhjdbXj8",
+    "img[src^='data:image/png;base64']",
+    "img[src*='qrcode']",
+    "img[src*='qr']",
+    "img[alt*='二维码']",
+    "[class*=qrcode] img",
+]
+
+
+def clear_proxy_env():
+    for key in (
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "SOCKS_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "socks_proxy",
+    ):
+        os.environ.pop(key, None)
+
+
+def has_valid_login_cookie(cookies: list[dict]) -> bool:
+    for c in cookies:
+        if c.get("name") == "sessionid" and c.get("value"):
+            return True
+    return False
+
+
+def is_logged_in_url(url: str) -> bool:
+    lower = (url or "").lower()
+    if "douyin.com" not in lower:
+        return False
+    return not any(x in lower for x in ("passport", "/login", "/auth"))
+
+
+def open_login_panel(page) -> None:
+    """打开登录弹窗并切到扫码（只用短超时选择器，避免全页扫描卡顿）"""
+    clicked = False
+    for fn in (
+        lambda: page.click("#login-panel-new", timeout=3000),
+        lambda: page.locator("[id*='login-panel'], [id*='login-pannel']").first.click(timeout=2000),
+        lambda: page.get_by_role("button", name="登录").first.click(timeout=2000),
+    ):
+        try:
+            fn()
+            clicked = True
+            break
+        except Exception:
+            continue
+    if clicked:
+        page.wait_for_timeout(1500)
+
+    for text in ("扫码登录", "二维码登录", "二维码"):
+        try:
+            page.get_by_text(text, exact=False).first.click(timeout=1500)
+            page.wait_for_timeout(800)
+            return
+        except Exception:
+            continue
+
+
+def find_qr_element(page):
+    scopes = [page, *page.frames]
+    for scope in scopes:
+        for sel in QR_SELECTORS:
+            try:
+                el = scope.query_selector(sel)
+                if not el:
+                    continue
+                box = el.bounding_box()
+                if box and box.get("width", 0) >= 100 and box.get("height", 0) >= 100:
+                    return el
+            except Exception:
+                continue
+    return None
+
+
+def wait_for_qr_element(page, status_cb=None, timeout_sec: int = 35):
+    """轮询等待二维码出现，必要时重试打开登录弹窗。"""
+    import time
+
+    deadline = time.time() + timeout_sec
+    opened = False
+    last_open_retry = 0.0
+    last_status_emit = 0.0
+    while time.time() < deadline:
+        element = find_qr_element(page)
+        if element:
+            return element
+
+        now = time.time()
+        if not opened:
+            open_login_panel(page)
+            opened = True
+            last_open_retry = now
+        elif now - last_open_retry >= 8:
+            open_login_panel(page)
+            last_open_retry = now
+
+        if status_cb and now - last_status_emit >= 2:
+            remain = max(0, int(deadline - now))
+            status_cb(f"等待二维码出现...（剩余约 {remain}s）")
+            last_status_emit = now
+
+        page.wait_for_timeout(500)
+    return None
+
+
+def extract_login_cookies(context, page, status_cb=None) -> str | None:
+    """登录成功后提取 Cookie"""
+    cookies = context.cookies()
+    if has_valid_login_cookie(cookies):
+        return cookies_to_header(cookies)
+
+    if status_cb:
+        status_cb("登录成功，正在提取 Cookie...")
+    try:
+        page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=20000)
+        page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+    cookies = context.cookies()
+    if has_valid_login_cookie(cookies):
+        return cookies_to_header(cookies)
+    return None
+
+
 class QualitySelectionDialog(QDialog):
     """Modern quality selection dialog"""
     def __init__(self, qualities: list[dict], parent=None):
@@ -551,313 +684,102 @@ class CookieWorker(QThread):
             self.error.emit("缺少 playwright，请先安装：pip install playwright && playwright install chromium")
             return
 
+        clear_proxy_env()
+        browser = None
         try:
+            self.status.emit("启动浏览器...")
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--no-sandbox",
+                    ],
+                )
                 context = browser.new_context(
-                    viewport={"width": 1280, "height": 720},
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"
-                    ),
+                    viewport={"width": 1280, "height": 800},
+                    user_agent=DOUYIN_UA,
                     locale="zh-CN",
                     timezone_id="Asia/Shanghai",
                 )
+                context.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                )
                 page = context.new_page()
-                self.status.emit("打开登录页...")
-                page.goto("https://www.douyin.com", wait_until="domcontentloaded", timeout=30000)
-                content = ""
-                try:
-                    content = page.content()
-                except Exception:
-                    content = ""
 
-                if "error_code" in content or "缺少参数" in content:
-                    self.status.emit("登录页受限，切换备用入口...")
-                    page.goto(
-                        "https://www.douyin.com/passport/web/auth/?aid=6383&next=https%3A%2F%2Fwww.douyin.com",
-                        wait_until="domcontentloaded",
-                        timeout=30000,
-                    )
+                self.status.emit("打开抖音...")
+                page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(1500)
 
-                self.status.emit("等待二维码出现...")
-                element = None
-                # 优先查找二维码图片（更精确，避免截到整块区域）
-                selectors = [
-                    "img[aria-label*='二维码']",
-                    "img.RhjdbXj8",
-                    "img[src^='data:image/png;base64']",
-                    "img[src*='qrcode']",
-                    "img[src*='qr']",
-                    "img[alt*='二维码']",
-                    "[class*=qrcode] img",
-                ]
-                # 若是手机号登录界面，尝试切换到扫码登录
-                try:
-                    for text in ["扫码登录", "二维码登录", "二维码", "扫码"]:
-                        btn = page.query_selector(f"text={text}")
-                        if btn:
-                            btn.click()
-                            break
-                except Exception:
-                    pass
+                cookies = context.cookies()
+                if has_valid_login_cookie(cookies):
+                    cookie_str = extract_login_cookies(context, page, self.status.emit)
+                    if cookie_str:
+                        self.done.emit(cookie_str)
+                        browser.close()
+                        return
 
-                for _ in range(40):
-                    for sel in selectors:
-                        try:
-                            el = page.query_selector(sel)
-                            if el:
-                                box = el.bounding_box()
-                                if box and box["width"] >= 120 and box["height"] >= 120:
-                                    element = el
-                                    break
-                        except Exception:
-                            continue
-                    if element:
-                        break
-                    page.wait_for_timeout(500)
-
-                # 处理 iframe 场景
-                if not element:
-                    try:
-                        for frame in page.frames:
-                            for sel in selectors:
-                                el = frame.query_selector(sel)
-                                if el:
-                                    box = el.bounding_box()
-                                    if box and box["width"] >= 120 and box["height"] >= 120:
-                                        element = el
-                                        break
-                            if element:
-                                break
-                    except Exception:
-                        element = None
+                self.status.emit("获取二维码...")
+                element = wait_for_qr_element(page, self.status.emit, timeout_sec=35)
 
                 if not element:
-                    self.error.emit("未找到二维码，请确认页面可访问并未被拦截")
+                    self.error.emit("未找到二维码，请确认网络正常且页面未被拦截")
                     browser.close()
                     return
 
                 try:
-                    img_bytes = element.screenshot()
-                    self.qr.emit(img_bytes)
+                    self.qr.emit(element.screenshot())
                 except Exception:
                     self.error.emit("二维码截图失败")
                     browser.close()
                     return
 
-                self.status.emit("等待扫码登录...")
+                self.status.emit("等待扫码，请在手机上确认登录...")
+                start_url = page.url
 
-                def has_login_cookies(cookies: list[dict]) -> bool:
-                    """检测是否有完整的登录cookie（必须包含关键登录标识）"""
-                    names = {c.get("name") for c in cookies}
-                    # 必须同时有sessionid和sid_tt或uid_tt（这是登录成功的核心标识）
-                    has_sessionid = "sessionid" in names
-                    has_sid_tt = "sid_tt" in names
-                    has_uid_tt = "uid_tt" in names
-                    
-                    # 主要检测：sessionid + sid_tt 或 uid_tt（必须同时存在）
-                    if has_sessionid and (has_sid_tt or has_uid_tt):
-                        return True
-                    
-                    # 次要检测：passport_auth_status且值为"1"（表示已认证）
-                    for c in cookies:
-                        if c.get("name") == "passport_auth_status" and c.get("value") == "1":
-                            return True
-                    
-                    return False
-
-                # 监听页面导航事件（登录成功通常会跳转）
-                navigation_occurred = False
-                def on_navigation(frame):
-                    nonlocal navigation_occurred
-                    if frame == page.main_frame:
-                        navigation_occurred = True
-                
-                page.on("framenavigated", on_navigation)
-
-                # 监听网络请求（登录成功会触发新的API请求）
-                login_request_detected = False
-                def on_request(request):
-                    nonlocal login_request_detected
-                    url = request.url
-                    # 登录成功后会请求用户信息或主页数据
-                    if any(keyword in url for keyword in ["/aweme/v1/web/user/", "/aweme/v1/web/im/user/info/", "/aweme/v1/web/im/user/info/"]):
-                        login_request_detected = True
-                
-                page.on("request", on_request)
-
-                original_url = page.url
-                last_cookie_count = 0
-
-                for i in range(300):  # 增加到300次（5分钟）
+                for i in range(120):
                     cookies = context.cookies()
-                    cookie_count = len(cookies)
-                    
-                    # 检测cookie数量变化（登录成功会新增多个cookie）
-                    cookie_increased = cookie_count > last_cookie_count
-                    last_cookie_count = cookie_count
-                    
-                    login_by_cookie = has_login_cookies(cookies)
-
-                    # 检测二维码是否消失（多种方式检测）
-                    qr_gone = False
-                    try:
-                        if element:
-                            # 方式1：检查元素是否可见
-                            qr_gone = not element.is_visible()
-                            # 方式2：检查元素是否还在DOM中
-                            if not qr_gone:
-                                try:
-                                    element.bounding_box()  # 如果元素不存在会抛异常
-                                except Exception:
-                                    qr_gone = True
-                    except Exception:
-                        qr_gone = True
-                    
-                    # 方式3：检查页面中是否还有二维码相关元素
-                    if not qr_gone:
-                        try:
-                            qr_selectors = [
-                                "img[aria-label*='二维码']",
-                                "img[src*='qrcode']",
-                                "img[src*='qr']",
-                            ]
-                            found_qr = False
-                            for sel in qr_selectors:
-                                if page.query_selector(sel):
-                                    found_qr = True
-                                    break
-                            if not found_qr:
-                                qr_gone = True
-                        except Exception:
-                            pass
-
-                    # 检测页面文本变化（增加更多关键词）
-                    login_text = False
-                    try:
-                        page_text = page.content()
-                        # 增加更多登录成功的标识
-                        login_keywords = [
-                            "扫码成功", "已登录", "登录成功", "登录完成", "确认登录",
-                            "登录验证成功", "验证通过", "授权成功"
-                        ]
-                        for t in login_keywords:
-                            if t in page_text:
-                                login_text = True
-                                break
-                    except Exception:
-                        login_text = False
-
-                    # 检测URL变化（登录成功会跳转）
                     current_url = page.url
-                    url_changed = (
-                        current_url != original_url and 
-                        "login" not in current_url.lower() and 
-                        "passport" not in current_url.lower() and
-                        "auth" not in current_url.lower()
-                    )
-                    
-                    # 检测是否跳转到主页（douyin.com且不是登录页）
-                    is_homepage = (
-                        "douyin.com" in current_url and 
-                        current_url != original_url and
-                        "passport" not in current_url.lower() and
-                        "login" not in current_url.lower()
-                    )
 
-                    # 综合判断：必须确认登录成功才保存，优先级从高到低
-                    # 1. 如果有完整的登录cookie（sessionid + sid_tt/uid_tt），立即保存（最高优先级）
-                    if login_by_cookie:
-                        self.status.emit("检测到登录Cookie，正在保存...")
-                        page.wait_for_timeout(2000)  # 等待cookie完整
-                        cookies = context.cookies()
-                        # 再次确认有登录cookie
-                        if has_login_cookies(cookies):
-                            cookie_str = cookies_to_header(cookies)
-                            self.done.emit(cookie_str)
-                            browser.close()
-                            return
-                    
-                    # 2. 如果跳转到主页（最可靠的登录成功标志）
-                    if is_homepage:
-                        self.status.emit("检测到跳转主页，等待Cookie...")
-                        page.wait_for_timeout(4000)  # 等待cookie完整设置
-                        cookies = context.cookies()
-                        # 必须确认有登录cookie才保存
-                        if has_login_cookies(cookies):
-                            cookie_str = cookies_to_header(cookies)
-                            self.done.emit(cookie_str)
-                            browser.close()
-                            return
-                    
-                    # 3. 如果二维码消失 + URL变化（跳转），说明登录成功
-                    if qr_gone and url_changed:
-                        self.status.emit("检测到登录跳转，等待Cookie...")
-                        page.wait_for_timeout(4000)  # 等待cookie完整设置
-                        cookies = context.cookies()
-                        # 必须确认有登录cookie才保存
-                        if has_login_cookies(cookies):
-                            cookie_str = cookies_to_header(cookies)
-                            self.done.emit(cookie_str)
-                            browser.close()
-                            return
-                    
-                    # 4. 如果页面文本显示登录成功
-                    if login_text:
-                        self.status.emit("检测到登录成功提示，验证Cookie...")
-                        page.wait_for_timeout(4000)
-                        cookies = context.cookies()
-                        # 必须确认有登录cookie才保存
-                        if has_login_cookies(cookies):
-                            cookie_str = cookies_to_header(cookies)
-                            self.done.emit(cookie_str)
-                            browser.close()
-                            return
-                    
-                    # 5. 如果检测到登录相关的API请求
-                    if login_request_detected:
-                        self.status.emit("检测到登录请求，验证Cookie...")
-                        page.wait_for_timeout(3000)
-                        cookies = context.cookies()
-                        # 必须确认有登录cookie才保存
-                        if has_login_cookies(cookies):
-                            cookie_str = cookies_to_header(cookies)
-                            self.done.emit(cookie_str)
-                            browser.close()
-                            return
-                    
-                    # 6. 如果二维码消失 + cookie数量显著增加，等待后验证
-                    if qr_gone and cookie_increased and cookie_count >= 10:
-                        self.status.emit("检测到扫码成功，等待Cookie设置...")
-                        page.wait_for_timeout(5000)  # 等待更长时间确保cookie完整
-                        cookies = context.cookies()
-                        # 必须确认有登录cookie才保存
-                        if has_login_cookies(cookies):
-                            cookie_str = cookies_to_header(cookies)
-                            self.done.emit(cookie_str)
-                            browser.close()
-                            return
-                    
-                    # 7. 如果二维码消失 + 导航发生 + cookie增加
-                    if qr_gone and navigation_occurred and cookie_increased:
-                        self.status.emit("检测到页面变化，等待Cookie...")
-                        page.wait_for_timeout(4000)
-                        cookies = context.cookies()
-                        if has_login_cookies(cookies):
-                            cookie_str = cookies_to_header(cookies)
+                    if has_valid_login_cookie(cookies):
+                        cookie_str = extract_login_cookies(context, page, self.status.emit)
+                        if cookie_str:
                             self.done.emit(cookie_str)
                             browser.close()
                             return
 
-                    if i % 10 == 0:
-                        self.status.emit(f"等待扫码登录... ({i//10 + 1}/30)")
+                    if is_logged_in_url(current_url) and current_url != start_url:
+                        cookie_str = extract_login_cookies(context, page, self.status.emit)
+                        if cookie_str:
+                            self.done.emit(cookie_str)
+                            browser.close()
+                            return
+
+                    try:
+                        text = page.inner_text("body")
+                        if "扫码成功" in text:
+                            self.status.emit("扫码成功，请在手机上点击确认...")
+                        elif any(k in text for k in ("登录成功", "已登录", "登录完成")):
+                            cookie_str = extract_login_cookies(context, page, self.status.emit)
+                            if cookie_str:
+                                self.done.emit(cookie_str)
+                                browser.close()
+                                return
+                    except Exception:
+                        pass
+
+                    if i % 5 == 0:
+                        self.status.emit(f"等待扫码登录... ({i // 5 + 1}/24)")
                     page.wait_for_timeout(1000)
 
-                self.error.emit("登录超时，请重试")
+                self.error.emit("登录超时，请重试（扫码后需在手机上确认）")
                 browser.close()
         except Exception as e:
+            if browser:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
             self.error.emit(f"获取失败: {e}")
 
 
@@ -869,7 +791,7 @@ class MainWindow(QMainWindow):
         self.parser.set_cookie(self.config.get("cookie"))
         self.save_dir = self.config.get("save_dir", DEFAULT_SAVE_DIR)
 
-        self.setWindowTitle("抖音无水印解析器 v2.0.3")
+        self.setWindowTitle("抖音无水印解析器 v2.0.4")
         self.setMinimumSize(1200, 760)
 
         tabs = QTabWidget()
@@ -1400,7 +1322,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "精简版不支持自动获取Cookie")
             return
         self.cookie_status.setText("状态：获取中...")
-        self.cookie_qr.setText("加载二维码中...")
+        self.cookie_qr.clear()
+        self.cookie_qr.setText("启动浏览器...")
         self.cookie_worker = CookieWorker()
         self.cookie_worker.qr.connect(self._on_cookie_qr)
         self.cookie_worker.status.connect(self._on_cookie_status)
@@ -1415,6 +1338,8 @@ class MainWindow(QMainWindow):
 
     def _on_cookie_status(self, text: str):
         self.cookie_status.setText(f"状态：{text}")
+        if not self.cookie_qr.pixmap():
+            self.cookie_qr.setText(text)
 
     def _on_cookie_done(self, cookie: str):
         self.cookie_status.setText("状态：获取成功")

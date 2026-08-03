@@ -39,3 +39,5 @@ images/
 # 打包文件（exe文件太大，通过GitHub Release上传）
 *.exe
 releases/
+PACKAGING.md
+build.ps1
