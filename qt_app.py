@@ -146,6 +146,17 @@ def has_valid_login_cookie(cookies: list[dict]) -> bool:
     return False
 
 
+def cookie_has_gateway_fields(cookie_str: str) -> bool:
+    names = set()
+    for part in (cookie_str or "").split(";"):
+        part = part.strip()
+        if "=" in part:
+            names.add(part.split("=", 1)[0].strip())
+    if "UIFID" in names or "UIFID_TEMP" in names:
+        return True
+    return "s_v_web_id" in names
+
+
 def is_logged_in_url(url: str) -> bool:
     lower = (url or "").lower()
     if "douyin.com" not in lower:
@@ -672,7 +683,6 @@ class DownloadWorker(QThread):
 
 
 class CookieWorker(QThread):
-    qr = Signal(bytes)
     status = Signal(str)
     done = Signal(str)
     error = Signal(str)
@@ -687,17 +697,17 @@ class CookieWorker(QThread):
         clear_proxy_env()
         browser = None
         try:
-            self.status.emit("启动浏览器...")
+            self.status.emit("正在打开浏览器窗口...")
             with sync_playwright() as p:
                 browser = p.chromium.launch(
-                    headless=True,
+                    headless=False,
                     args=[
                         "--disable-blink-features=AutomationControlled",
                         "--no-sandbox",
                     ],
                 )
                 context = browser.new_context(
-                    viewport={"width": 1280, "height": 800},
+                    viewport={"width": 1280, "height": 900},
                     user_agent=DOUYIN_UA,
                     locale="zh-CN",
                     timezone_id="Asia/Shanghai",
@@ -707,7 +717,7 @@ class CookieWorker(QThread):
                 )
                 page = context.new_page()
 
-                self.status.emit("打开抖音...")
+                self.status.emit("正在打开抖音首页...")
                 page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(1500)
 
@@ -719,60 +729,30 @@ class CookieWorker(QThread):
                         browser.close()
                         return
 
-                self.status.emit("获取二维码...")
-                element = wait_for_qr_element(page, self.status.emit, timeout_sec=35)
+                self.status.emit(
+                    "请在弹出的浏览器中登录抖音（扫码/密码均可，验证码需自行完成）"
+                )
 
-                if not element:
-                    self.error.emit("未找到二维码，请确认网络正常且页面未被拦截")
-                    browser.close()
-                    return
-
-                try:
-                    self.qr.emit(element.screenshot())
-                except Exception:
-                    self.error.emit("二维码截图失败")
-                    browser.close()
-                    return
-
-                self.status.emit("等待扫码，请在手机上确认登录...")
-                start_url = page.url
-
-                for i in range(120):
+                for i in range(600):
                     cookies = context.cookies()
-                    current_url = page.url
-
                     if has_valid_login_cookie(cookies):
                         cookie_str = extract_login_cookies(context, page, self.status.emit)
                         if cookie_str:
+                            if not cookie_has_gateway_fields(cookie_str):
+                                self.status.emit(
+                                    "已登录，但 Cookie 缺少 UIFID，正在尝试刷新..."
+                                )
                             self.done.emit(cookie_str)
                             browser.close()
                             return
 
-                    if is_logged_in_url(current_url) and current_url != start_url:
-                        cookie_str = extract_login_cookies(context, page, self.status.emit)
-                        if cookie_str:
-                            self.done.emit(cookie_str)
-                            browser.close()
-                            return
-
-                    try:
-                        text = page.inner_text("body")
-                        if "扫码成功" in text:
-                            self.status.emit("扫码成功，请在手机上点击确认...")
-                        elif any(k in text for k in ("登录成功", "已登录", "登录完成")):
-                            cookie_str = extract_login_cookies(context, page, self.status.emit)
-                            if cookie_str:
-                                self.done.emit(cookie_str)
-                                browser.close()
-                                return
-                    except Exception:
-                        pass
-
-                    if i % 5 == 0:
-                        self.status.emit(f"等待扫码登录... ({i // 5 + 1}/24)")
+                    if i % 15 == 0 and i > 0:
+                        self.status.emit(
+                            f"仍在等待登录...（已等待 {i // 60} 分 {i % 60} 秒，最长 10 分钟）"
+                        )
                     page.wait_for_timeout(1000)
 
-                self.error.emit("登录超时，请重试（扫码后需在手机上确认）")
+                self.error.emit("登录超时：请在浏览器中完成登录后重试")
                 browser.close()
         except Exception as e:
             if browser:
@@ -791,7 +771,7 @@ class MainWindow(QMainWindow):
         self.parser.set_cookie(self.config.get("cookie"))
         self.save_dir = self.config.get("save_dir", DEFAULT_SAVE_DIR)
 
-        self.setWindowTitle("抖音无水印解析器 v2.0.4")
+        self.setWindowTitle("抖音无水印解析器 v2.0.5")
         self.setMinimumSize(1200, 760)
 
         tabs = QTabWidget()
@@ -909,7 +889,7 @@ class MainWindow(QMainWindow):
 
         action_row = QHBoxLayout()
         self.cookie_status = QLabel("状态：未获取")
-        get_cookie_btn = QPushButton("获取Cookie")
+        get_cookie_btn = QPushButton("浏览器登录获取Cookie")
         action_row.addWidget(get_cookie_btn)
         action_row.addWidget(self.cookie_status)
         action_row.addStretch(1)
@@ -918,10 +898,16 @@ class MainWindow(QMainWindow):
         self.cookie_editor.setPlaceholderText("粘贴抖音 Cookie")
         self.cookie_editor.setPlainText(self.config.get("cookie", ""))
 
-        self.cookie_qr = QLabel("二维码预览")
-        self.cookie_qr.setFixedSize(260, 260)
-        self.cookie_qr.setAlignment(Qt.AlignCenter)
-        self.cookie_qr.setStyleSheet("background: #1b1f2a; border-radius: 8px;")
+        self.cookie_qr = QLabel(
+            "完整版将打开可见浏览器窗口。\n"
+            "请在窗口内正常登录抖音（含验证码），登录成功后本程序会自动保存 Cookie。"
+        )
+        self.cookie_qr.setFixedHeight(88)
+        self.cookie_qr.setWordWrap(True)
+        self.cookie_qr.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.cookie_qr.setStyleSheet(
+            "background: #1b1f2a; border-radius: 8px; padding: 10px; color: #cbd5e1;"
+        )
 
         path_row = QHBoxLayout()
         self.save_path_input = QLineEdit()
@@ -1322,24 +1308,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "精简版不支持自动获取Cookie")
             return
         self.cookie_status.setText("状态：获取中...")
-        self.cookie_qr.clear()
-        self.cookie_qr.setText("启动浏览器...")
+        self.cookie_qr.setText("正在启动浏览器，请稍候...")
         self.cookie_worker = CookieWorker()
-        self.cookie_worker.qr.connect(self._on_cookie_qr)
         self.cookie_worker.status.connect(self._on_cookie_status)
         self.cookie_worker.done.connect(self._on_cookie_done)
         self.cookie_worker.error.connect(self._on_cookie_error)
         self.cookie_worker.start()
 
-    def _on_cookie_qr(self, img_bytes: bytes):
-        pix = QPixmap()
-        if pix.loadFromData(img_bytes):
-            self.cookie_qr.setPixmap(pix.scaled(260, 260, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-
     def _on_cookie_status(self, text: str):
         self.cookie_status.setText(f"状态：{text}")
-        if not self.cookie_qr.pixmap():
-            self.cookie_qr.setText(text)
+        self.cookie_qr.setText(text)
 
     def _on_cookie_done(self, cookie: str):
         self.cookie_status.setText("状态：获取成功")
@@ -1347,7 +1325,15 @@ class MainWindow(QMainWindow):
         self.parser.set_cookie(cookie)
         save_dir = self.save_path_input.text().strip() or DEFAULT_SAVE_DIR
         save_config(cookie, save_dir)
-        QMessageBox.information(self, "Cookie", "已保存到文件")
+        if cookie_has_gateway_fields(cookie):
+            QMessageBox.information(self, "Cookie", "登录 Cookie 已保存（含解析所需字段）")
+        else:
+            QMessageBox.warning(
+                self,
+                "Cookie",
+                "已保存 sessionid，但未检测到 UIFID/s_v_web_id。\n"
+                "若解析仍报 403，请在浏览器中重新登录后再获取一次。",
+            )
 
     def _on_cookie_error(self, msg: str):
         self.cookie_status.setText("状态：失败")

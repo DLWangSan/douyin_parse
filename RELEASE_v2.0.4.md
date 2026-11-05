@@ -1,19 +1,20 @@
-# v2.0.4: 修复完整版扫码登录
+# v2.0.4: Fix QR Code Login (Full Edition)
 
-## 🎉 更新内容
+## What's New
 
-### 🔧 登录修复
-- 修复扫码后不会自动提取 Cookie 的问题
-- 优化登录页打开与二维码识别逻辑
-- 扫码成功后自动跳转首页并保存 Cookie
+### Login Fix
+- Fixed an issue where Cookie was not extracted automatically after scanning the QR code
+- Improved login panel opening and QR code detection
+- After a successful scan, the app now redirects to the homepage and saves Cookie automatically
 
-## 📦 Downloads
+## Downloads
 
-- `douyin_app_full_v2.0.4.exe` - 完整版（含 Playwright 扫码登录）
-- `douyin_app_slim_v2.0.4.exe` - 精简版（需手动导入 Cookie）
+- `douyin_app_full_v2.0.4.exe` - Full edition (Playwright QR login included)
+- `douyin_app_slim_v2.0.4.exe` - Slim edition (manual Cookie import required)
 
-## 📝 Changelog
+## Changelog
 
 ### Fixed
-- 完整版扫码登录后无法自动提取 Cookie
-- 登录检测条件过严导致无法完成保存
+- Full edition failed to extract Cookie after QR code login
+- Login detection was too strict, preventing Cookie from being saved
+- QR code loading could appear stuck on "Loading QR code..."
