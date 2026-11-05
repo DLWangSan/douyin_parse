@@ -63,6 +63,31 @@ class DouyinVideoParser:
     def set_cookie(self, cookie: str):
         self.cookie = (cookie or "").lstrip("\ufeff").strip()
 
+    @staticmethod
+    def _cookie_dict(cookie: str) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for part in (cookie or "").split(";"):
+            part = part.strip()
+            if not part or "=" not in part:
+                continue
+            name, value = part.split("=", 1)
+            result[name.strip()] = value.strip()
+        return result
+
+    def _apply_argus_context(self, params: dict, headers: dict) -> None:
+        """Douyin detail API 需 uifid + fp 与 Cookie 成套，否则 403 Uifid Not Found。"""
+        ck = self._cookie_dict(self.cookie)
+        uifid = ck.get("UIFID") or ck.get("UIFID_TEMP") or ""
+        s_v_web_id = ck.get("s_v_web_id") or ""
+        if uifid:
+            params.setdefault("uifid", uifid)
+            headers.setdefault("uifid", uifid)
+        if s_v_web_id:
+            params.setdefault("verifyFp", s_v_web_id)
+            params.setdefault("fp", s_v_web_id)
+        # 网关当前仅校验存在性，不校验取值（见 MediaCrawler 实测）
+        headers.setdefault("x-tt-argus", "1")
+
     def get_video_id(self, share_url: str) -> str | None:
         """从分享链接中提取视频ID，支持多种格式"""
         # 先尝试从文本中提取URL（处理复制时可能包含的文本、换行等）
@@ -185,6 +210,7 @@ class DouyinVideoParser:
             else f"https://www.douyin.com/video/{video_id}"
         )
         headers = self._build_headers(referer)
+        self._apply_argus_context(params, headers)
         api_url = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
         result = self._request_json(api_url, params, headers)
 
@@ -207,6 +233,8 @@ class DouyinVideoParser:
                     data = resp.json()
                     if isinstance(data, dict) and data.get("status_code") == 0:
                         return data
+                if resp.status_code == 403 and "Uifid Not Found" in resp.text:
+                    return None
             except Exception:
                 pass
 
@@ -746,6 +774,7 @@ class DouyinVideoParser:
                 "cut_version": "1",
                 "publish_video_strategy_type": "2",
             })
+            self._apply_argus_context(params, headers)
 
             data = self._request_json(api_url, params, headers)
             if not data:
